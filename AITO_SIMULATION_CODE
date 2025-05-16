@@ -1,0 +1,153 @@
+# Install & imports
+!pip install pandas numpy --quiet
+
+import random
+import string
+from datetime import datetime, timedelta
+from dataclasses import dataclass, field
+from typing import List, Dict
+import numpy as np
+import pandas as pd
+
+@dataclass
+class SimulationConfig:
+    num_users: int = 100
+    services: List[str] = field(default_factory=lambda: ['Haircut', 'Massage', 'Dentist Appointment'])
+    professionals: List[str] = field(default_factory=lambda: ['Alex', 'Jordan', 'Taylor'])
+    error_prob: float = 0.05           # per-step error probability
+    cancel_prob: float = 0.07          # chance to cancel at each step
+    note_usage_prob: float = 0.4       # chance to use optional note
+    seed: int = 42                     # for reproducibility
+
+@dataclass
+class BookingResult:
+    user_id: int
+    service: str
+    professional: str
+    used_note: bool
+    errors: int
+    cancelled: bool
+    cancel_step: str
+    step_times: Dict[str, float]
+    total_time: float
+    success: bool
+
+class BookingSimulator:
+    def __init__(self, config: SimulationConfig):
+        self.cfg = config
+        random.seed(self.cfg.seed)
+        np.random.seed(self.cfg.seed)
+
+    def _maybe_error(self) -> bool:
+        return random.random() < self.cfg.error_prob
+
+    def _maybe_cancel(self) -> bool:
+        return random.random() < self.cfg.cancel_prob
+
+    def _step_time(self, mean: float, std: float) -> float:
+        # draw from a normal distribution but enforce >0
+        t = -1
+        while t <= 0:
+            t = random.gauss(mean, std)
+        return t
+
+    def _simulate_one(self, user_id: int) -> BookingResult:
+        errors = 0
+        times = {}
+        cancel_step = ''
+        cancelled = False
+
+        # Step 1: Service selection
+        times['service_selection'] = self._step_time(10, 2)
+        if self._maybe_error():
+            errors += 1
+            times['service_selection'] += random.uniform(5,10)
+        if self._maybe_cancel():
+            return BookingResult(user_id, '', '', False, errors, True, 'service_selection',
+                                  times, sum(times.values()), False)
+
+        service = random.choice(self.cfg.services)
+
+        # Step 2: Professional/date selection
+        times['date_selection'] = self._step_time(15, 3)
+        if self._maybe_error():
+            errors += 1
+            times['date_selection'] += random.uniform(5,10)
+        if self._maybe_cancel():
+            return BookingResult(user_id, service, '', False, errors, True, 'date_selection',
+                                  times, sum(times.values()), False)
+
+        professional = random.choice(self.cfg.professionals)
+
+        # Step 3: User info entry
+        times['info_entry'] = self._step_time(20, 5)
+        if self._maybe_error():
+            errors += 1
+            times['info_entry'] += random.uniform(5,10)
+        used_note = random.random() < self.cfg.note_usage_prob
+        if used_note:
+            times['info_entry'] += random.uniform(5, 15)
+        if self._maybe_cancel():
+            return BookingResult(user_id, service, professional, used_note, errors, True, 'info_entry',
+                                  times, sum(times.values()), False)
+
+        # Step 4: Payment
+        times['payment'] = self._step_time(12, 4)
+        if self._maybe_error():
+            errors += 1
+            times['payment'] += random.uniform(5,10)
+        if self._maybe_cancel():
+            return BookingResult(user_id, service, professional, used_note, errors, True, 'payment',
+                                  times, sum(times.values()), False)
+
+        # Wrap up
+        total_time = sum(times.values())
+        success = (not cancelled) and (errors < 3)
+        return BookingResult(user_id, service, professional, used_note, errors, False, '',
+                              times, total_time, success)
+
+    def run(self) -> pd.DataFrame:
+        results = [self._simulate_one(uid) for uid in range(1, self.cfg.num_users+1)]
+        # Flatten to DataFrame
+        records = []
+        for r in results:
+            rec = {
+                'User_ID': r.user_id,
+                'Service': r.service,
+                'Professional': r.professional,
+                'Used_Note': r.used_note,
+                'Errors': r.errors,
+                'Cancelled': r.cancelled,
+                'Cancel_Step': r.cancel_step,
+                'Total_Time_sec': round(r.total_time,2),
+                'Success': r.success
+            }
+            # include per-step times
+            rec.update({f"Time_{k}": round(v,2) for k,v in r.step_times.items()})
+            records.append(rec)
+        return pd.DataFrame(records)
+
+# ---- Run the simulation ----
+cfg = SimulationConfig(num_users=200)
+sim = BookingSimulator(cfg)
+df = sim.run()
+
+# ---- Compute & display metrics ----
+metrics = {
+    'Task Success Rate (%)': round(df['Success'].mean()*100, 2),
+    'Avg. Completion Time (sec)': round(df.loc[df['Success'],'Total_Time_sec'].mean(), 2),
+    'Overall Cancellation Rate (%)': round(df['Cancelled'].mean()*100, 2),
+    'Avg. Errors per User': round(df['Errors'].mean(), 2),
+    'Note Usage Rate (%)': round(df['Used_Note'].mean()*100, 2),
+    'Cancel Rate by Step': df[df['Cancelled']].groupby('Cancel_Step').size().to_dict()
+}
+
+print("📊 UX Booking Simulation Metrics\n")
+for k,v in metrics.items():
+    print(f"{k}: {v}")
+
+# Optionally save
+# df.to_csv("booking_simulation_detailed.csv", index=False)
+
+# Peek at the first few rows
+df.head(10)
